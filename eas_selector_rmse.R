@@ -2,6 +2,7 @@ library(XML)
 library(dplyr)
 library(ggplot2)
 library(xgboost)
+library(tidyr)
 
 rm(list = ls())
 graphics.off()
@@ -9,11 +10,11 @@ graphics.off()
 # =========================================================
 # Parâmetros
 # =========================================================
-f1_val_lim <- 0.5
-n_best_test <- 10
+rmse_val_lim <- 300
+n_best_test <- 30
 folder_data <- "data_2"
-prob_cutoff <- 0.7
-B <- 500
+pred_cutoff<-50
+B <- 100
 
 cov_cols <- c(
   "Profit",
@@ -29,13 +30,12 @@ cov_cols <- c(
   "Ind3Param0"
 )
 
-
-# cov_cols <- c(
-#   "Stop_Loss",
-#   "Take_Profit",
-#   "Ind0Param0",
-#   "Ind2Param0"
-# )
+cov_cols <- c(
+  "Stop_Loss",
+  "Take_Profit",
+  "Ind1Param0",
+  "Ind3Param0"
+)
 
 pred_col <- "Profit"
 
@@ -81,7 +81,7 @@ read_xml_file <- function(file_name) {
 # =========================================================
 # Ler todos os arquivos
 # =========================================================
-paths <- list.files(folder_data, pattern = "\\.xml$", full.names = TRUE)
+paths <- list.files(folder_data, pattern = "\\.xml$", full.names = TRUE)[1:24]
 print(paths)
 
 df <- data.frame()
@@ -105,21 +105,10 @@ df <- df %>%
 colnames(df)
 
 # =========================================================
-# Função para calcular F1-score
+# Função para calcular RMSE
 # =========================================================
-calc_f1 <- function(y_true, y_pred) {
-  tp <- sum(y_true == 1 & y_pred == 1, na.rm = TRUE)
-  fp <- sum(y_true == 0 & y_pred == 1, na.rm = TRUE)
-  fn <- sum(y_true == 1 & y_pred == 0, na.rm = TRUE)
-  
-  precision <- if ((tp + fp) == 0) 0 else tp / (tp + fp)
-  recall    <- if ((tp + fn) == 0) 0 else tp / (tp + fn)
-  
-  if ((precision + recall) == 0) {
-    return(0)
-  } else {
-    return(2 * precision * recall / (precision + recall))
-  }
+calc_rmse <- function(y_true, y_pred) {
+  sqrt(mean((y_true - y_pred)^2, na.rm = TRUE))
 }
 
 # =========================================================
@@ -150,9 +139,9 @@ append_zero_result <- function(summary_results, results_list, i, periods, motivo
     test_period_x = periods[i],
     test_period_y = periods[i + 1],
     model = NULL,
-    f1_train = NA_real_,
-    f1_val = NA_real_,
-    f1_test = NA_real_,
+    rmse_train = NA_real_,
+    rmse_val = NA_real_,
+    rmse_test = NA_real_,
     passed_val_filter = FALSE,
     n_selected_test = 0,
     sum_profit_best_test = 0,
@@ -172,9 +161,9 @@ append_zero_result <- function(summary_results, results_list, i, periods, motivo
       val_period_y = periods[i],
       test_period_x = periods[i],
       test_period_y = periods[i + 1],
-      f1_train = NA_real_,
-      f1_val = NA_real_,
-      f1_test = NA_real_,
+      rmse_train = NA_real_,
+      rmse_val = NA_real_,
+      rmse_test = NA_real_,
       passed_val_filter = FALSE,
       n_selected_test = 0,
       sum_profit_best_test = 0,
@@ -196,7 +185,7 @@ run_model <- function(df,
                       seed = NULL,
                       cov_cols,
                       pred_col = "Profit",
-                      f1_val_lim = 0.7,
+                      rmse_val_lim = 100,
                       n_best_test = 10,
                       make_plots = TRUE) {
   
@@ -217,9 +206,9 @@ run_model <- function(df,
     val_period_y = character(),
     test_period_x = character(),
     test_period_y = character(),
-    f1_train = numeric(),
-    f1_val = numeric(),
-    f1_test = numeric(),
+    rmse_train = numeric(),
+    rmse_val = numeric(),
+    rmse_test = numeric(),
     passed_val_filter = logical(),
     n_selected_test = integer(),
     sum_profit_best_test = numeric(),
@@ -255,8 +244,7 @@ run_model <- function(df,
     
     Y_train <- df %>%
       filter(Period == periods[i - 1]) %>%
-      mutate(Target = as.integer(.data[[pred_col]] > 0)) %>%
-      pull(Target)
+      pull(all_of(pred_col))
     
     X_val_raw <- df %>%
       filter(Period == periods[i - 1]) %>%
@@ -265,8 +253,7 @@ run_model <- function(df,
     
     Y_val <- df %>%
       filter(Period == periods[i]) %>%
-      mutate(Target = as.integer(.data[[pred_col]] > 0)) %>%
-      pull(Target)
+      pull(all_of(pred_col))
     
     X_test_raw <- df %>%
       filter(Period == periods[i]) %>%
@@ -275,11 +262,10 @@ run_model <- function(df,
     
     Y_test_df <- df %>%
       filter(Period == periods[i + 1]) %>%
-      mutate(Target = as.integer(.data[[pred_col]] > 0)) %>%
-      select(all_of(pred_col), Target)
+      select(all_of(pred_col))
     
-    Y_test <- Y_test_df$Target
-    Profit_test_real <- Y_test_df[[pred_col]]
+    Y_test <- Y_test_df[[pred_col]]
+    Profit_test_real <- Y_test
     
     # -------------------------------------------------------
     # Checagens de integridade
@@ -315,30 +301,6 @@ run_model <- function(df,
       
       tmp <- append_zero_result(summary_results, results_list, i, periods,
                                 "NA/NaN/Inf encontrado")
-      summary_results <- tmp$summary_results
-      results_list <- tmp$results_list
-      next
-    }
-    
-    if (length(unique(Y_train)) < 2) {
-      tmp <- append_zero_result(summary_results, results_list, i, periods,
-                                "Y_train com apenas uma classe")
-      summary_results <- tmp$summary_results
-      results_list <- tmp$results_list
-      next
-    }
-    
-    if (length(unique(Y_val)) < 2) {
-      tmp <- append_zero_result(summary_results, results_list, i, periods,
-                                "Y_val com apenas uma classe")
-      summary_results <- tmp$summary_results
-      results_list <- tmp$results_list
-      next
-    }
-    
-    if (length(unique(Y_test)) < 2) {
-      tmp <- append_zero_result(summary_results, results_list, i, periods,
-                                "Y_test com apenas uma classe")
       summary_results <- tmp$summary_results
       results_list <- tmp$results_list
       next
@@ -381,13 +343,13 @@ run_model <- function(df,
     watchlist <- list(train = dtrain, val = dval)
     
     # -------------------------------------------------------
-    # Parâmetros do modelo
+    # Parâmetros do modelo preditivo
     # -------------------------------------------------------
     params <- list(
-      objective = "binary:logistic",
-      eval_metric = "logloss",
+      objective = "reg:squarederror",
+      eval_metric = "rmse",
       max_depth = 3,
-      eta = 1.5,
+      eta = 0.005,
       subsample = 0.8,
       colsample_bytree = 0.8
     )
@@ -400,7 +362,7 @@ run_model <- function(df,
         xgb.train(
           params = params,
           data = dtrain,
-          nrounds = 100,
+          nrounds = 200,
           evals = watchlist,
           early_stopping_rounds = 20,
           verbose = 0
@@ -424,13 +386,13 @@ run_model <- function(df,
     # Predições protegidas
     # -------------------------------------------------------
     pred_ok <- TRUE
-    Pred_train_prob <- Pred_val_prob <- Pred_test_prob <- NULL
+    Pred_train <- Pred_val <- Pred_test <- NULL
     
     tryCatch(
       {
-        Pred_train_prob <- predict(modelo, dtrain)
-        Pred_val_prob   <- predict(modelo, dval)
-        Pred_test_prob  <- predict(modelo, dtest)
+        Pred_train <- predict(modelo, dtrain)
+        Pred_val   <- predict(modelo, dval)
+        Pred_test  <- predict(modelo, dtest)
       },
       error = function(e) {
         cat("Erro na predição:", conditionMessage(e), "\n")
@@ -439,12 +401,12 @@ run_model <- function(df,
     )
     
     if (!pred_ok ||
-        is.null(Pred_train_prob) ||
-        is.null(Pred_val_prob) ||
-        is.null(Pred_test_prob) ||
-        any(!is.finite(Pred_train_prob)) ||
-        any(!is.finite(Pred_val_prob)) ||
-        any(!is.finite(Pred_test_prob))) {
+        is.null(Pred_train) ||
+        is.null(Pred_val) ||
+        is.null(Pred_test) ||
+        any(!is.finite(Pred_train)) ||
+        any(!is.finite(Pred_val)) ||
+        any(!is.finite(Pred_test))) {
       
       tmp <- append_zero_result(summary_results, results_list, i, periods,
                                 "falha nas previsões")
@@ -454,44 +416,40 @@ run_model <- function(df,
     }
     
     # -------------------------------------------------------
-    # Classes previstas
-    # -------------------------------------------------------
-    Pred_train_class <- as.integer(Pred_train_prob >= prob_cutoff )
-    Pred_val_class   <- as.integer(Pred_val_prob >= prob_cutoff )
-    Pred_test_class  <- as.integer(Pred_test_prob >= prob_cutoff )
-    
-    # -------------------------------------------------------
     # Métricas
     # -------------------------------------------------------
-    f1_train <- calc_f1(Y_train, Pred_train_class)
-    f1_val   <- calc_f1(Y_val, Pred_val_class)
-    f1_test  <- calc_f1(Y_test, Pred_test_class)
+    rmse_train <- calc_rmse(Y_train, Pred_train)
+    rmse_val   <- calc_rmse(Y_val, Pred_val)
+    rmse_test  <- calc_rmse(Y_test, Pred_test)
     
-    cat("F1 treino:", round(f1_train, 4), "\n")
-    cat("F1 validação:", round(f1_val, 4), "\n")
-    cat("F1 teste:", round(f1_test, 4), "\n")
+    cat("RMSE treino:", round(rmse_train, 4), "\n")
+    cat("RMSE validação:", round(rmse_val, 4), "\n")
+    cat("RMSE teste:", round(rmse_test, 4), "\n")
     
     # -------------------------------------------------------
     # Filtro de validação
     # -------------------------------------------------------
-    passed_val_filter <- (f1_val >= f1_val_lim) & (f1_train >= f1_val_lim)
+    passed_val_filter <- (rmse_val <= rmse_val_lim) & (rmse_train <= rmse_val_lim)
     
     # -------------------------------------------------------
     # Seleção das melhores oportunidades do teste
     # -------------------------------------------------------
     if (passed_val_filter) {
       
-      n_select <- min(n_best_test, length(Pred_test_prob))
+      n_select <- min(n_best_test, length(Pred_test))
       
       df_test_rank <- data.frame(
         Pass = c(0:(nrow(X_test) - 1)),
         Profit_test_real = Profit_test_real,
-        Y_test = Y_test,
-        Pred_test_prob = Pred_test_prob,
-        Pred_test_class = Pred_test_class
+        Pred_test = Pred_test
       ) %>%
-        arrange(desc(Pred_test_prob)) %>%
-        slice_head(n = n_select)
+        arrange(desc(Pred_test)) %>%
+        slice_head(n = n_select)%>%
+        filter(Pred_test > pred_cutoff)
+      
+      cat("n_select (df_test_rank): ", n_select, "\n")
+      print(df_test_rank)
+      
       
       sum_profit_best_test <- sum(df_test_rank$Profit_test_real, na.rm = TRUE)
       
@@ -512,15 +470,12 @@ run_model <- function(df,
     # -------------------------------------------------------
     df_val <- data.frame(
       Y_val = Y_val,
-      Pred_val_prob = Pred_val_prob,
-      Pred_val_class = Pred_val_class
+      Pred_val = Pred_val
     )
     
     df_test <- data.frame(
       Profit_test_real = Profit_test_real,
-      Y_test = Y_test,
-      Pred_test_prob = Pred_test_prob,
-      Pred_test_class = Pred_test_class
+      Pred_test = Pred_test
     )
     
     # -------------------------------------------------------
@@ -528,11 +483,11 @@ run_model <- function(df,
     # -------------------------------------------------------
     if (make_plots) {
       plot_val <- df_val %>%
-        ggplot(aes(x = factor(Y_val), y = Pred_val_prob)) +
-        geom_boxplot() +
+        ggplot(aes(x = Y_val, y = Pred_val)) +
+        geom_point(alpha = 0.6) +
         labs(
-          x = "Classe real (0 = Profit <= 0, 1 = Profit > 0)",
-          y = "Probabilidade prevista da classe 1",
+          x = "Lucro real",
+          y = "Lucro previsto",
           title = paste("Validação -", periods[i])
         ) +
         theme_minimal()
@@ -540,11 +495,11 @@ run_model <- function(df,
       print(plot_val)
       
       plot_test <- df_test %>%
-        ggplot(aes(x = factor(Y_test), y = Pred_test_prob)) +
-        geom_boxplot() +
+        ggplot(aes(x = Profit_test_real, y = Pred_test)) +
+        geom_point(alpha = 0.6) +
         labs(
-          x = "Classe real (0 = Profit <= 0, 1 = Profit > 0)",
-          y = "Probabilidade prevista da classe 1",
+          x = "Lucro real",
+          y = "Lucro previsto",
           title = paste("Teste -", periods[i + 1])
         ) +
         theme_minimal()
@@ -564,9 +519,9 @@ run_model <- function(df,
       test_period_x = periods[i],
       test_period_y = periods[i + 1],
       model = modelo,
-      f1_train = f1_train,
-      f1_val = f1_val,
-      f1_test = f1_test,
+      rmse_train = rmse_train,
+      rmse_val = rmse_val,
+      rmse_test = rmse_test,
       passed_val_filter = passed_val_filter,
       n_selected_test = n_select,
       sum_profit_best_test = sum_profit_best_test,
@@ -586,9 +541,9 @@ run_model <- function(df,
         val_period_y = periods[i],
         test_period_x = periods[i],
         test_period_y = periods[i + 1],
-        f1_train = f1_train,
-        f1_val = f1_val,
-        f1_test = f1_test,
+        rmse_train = rmse_train,
+        rmse_val = rmse_val,
+        rmse_test = rmse_test,
         passed_val_filter = passed_val_filter,
         n_selected_test = n_select,
         sum_profit_best_test = sum_profit_best_test,
@@ -610,12 +565,7 @@ run_model <- function(df,
 # =========================================================
 # Simulação / repetição
 # =========================================================
-# Profit <- data.frame( first_part =  numeric(B), second_part = numeric(B))
-Profit<-data.frame()
-Profit
-
-
-all_runs <- vector("list", B)
+Profit <- data.frame()
 N <- numeric(B)
 
 for (b in 1:B) {
@@ -628,80 +578,42 @@ for (b in 1:B) {
     seed = b,
     cov_cols = cov_cols,
     pred_col = pred_col,
-    f1_val_lim = f1_val_lim,
+    rmse_val_lim = rmse_val_lim,
     n_best_test = n_best_test,
     make_plots = FALSE
   )
   
-  # l = length(out$summary_results$sum_profit_best_test)
-  # l
-  # Profit[b,1] <- sum(out$summary_results$sum_profit_best_test[1:round(l/2)])
-  # Profit[b,2] <- sum(out$summary_results$sum_profit_best_test[(round(l/2)+1):l])
-  Profit<-rbind(Profit, out$summary_results$sum_profit_best_test)
-  
+  Profit <- rbind(Profit, out$summary_results$sum_profit_best_test)
   N[b] <- sum(out$summary_results$passed_val_filter)
-  # all_runs[[b]] <- out
 }
 
 
-colnames(Profit)<-sprintf("int_%d", 1:(length(paths)-3))
-Profit
 
-Profit %>%
-  as.data.frame() %>%
-  tidyr::pivot_longer(cols = everything(), names_to = "intervalo", values_to = "valor") %>%
-  mutate(intervalo = factor(intervalo, levels = unique(intervalo))) %>%
-  ggplot(aes(x = intervalo, y = valor)) +
-  geom_col(fill = "steelblue") +
+# Criar um dataframe com os dados e os rótulos
+R = Profit%>%colSums()%>%as.vector()
+dados <- data.frame(
+  indice = paste0("int_", 1:length(R)),  # Cria "int_1", "int_2", etc.
+  valor =  R
+)
+
+# Criar o gráfico de barras
+
+
+
+# CONVERTER PARA FATOR COM NÍVEIS NA ORDEM CORRETA
+dados$indice <- factor(dados$indice, levels = paste0("int_", 1:length(R)))
+
+# Criar o gráfico - a ordem será mantida!
+ggplot(dados, aes(x = indice, y = valor, fill = valor > 0)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "coral")) +
+  labs(title = "Ordem Correta no Eixo X",
+       x = "Índice",
+       y = "Valor") +
+  theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 
-Profit%>%colSums()%>%as.vector()
+mean(R[R!=0]>0)
 
-# =========================================================
-# Estatísticas finais
-# =========================================================
-#Profit
-
-# m_first <- mean(Profit[,1])
-# print(m_first)
-# 
-# m_second <- mean(Profit[,2])
-# print(m_second)
-# 
-# s_first <- sd(Profit[,1])
-# print(s_first)
-# 
-# s_second <- sd(Profit[,2])
-# print(s_second)
-# 
-# 
-# p_pos_first <- sum(Profit[,1] > 0) / sum(Profit[,1] != 0)
-# print(p_pos_first)
-# 
-# p_pos_second <- sum(Profit[,2] > 0) / sum(Profit[,2] != 0)
-# print(p_pos_second)
-# 
-# 
-# ic_first <- round(c(m_first - 1.96 * s_first / sqrt(B), m_first + 1.96 * s_first / sqrt(B)), 1)
-# print(ic_first)
-# 
-# ic_second <- round(c(m_second - 1.96 * s_second / sqrt(B), m_second + 1.96 * s_second / sqrt(B)), 1)
-# print(ic_second)
-# 
-# hist(
-#   Profit[Profit[,1] != 0,1],
-#   breaks = 30,
-#   main = "Distribuição dos Lucros Totais",
-#   xlab = "Lucro Total",
-#   col = "lightblue"
-# )
-# 
-# 
-# hist(
-#   Profit[Profit[,2] != 0,2],
-#   breaks = 30,
-#   main = "Distribuição dos Lucros Totais",
-#   xlab = "Lucro Total",
-#   col = "lightblue"
-# )
+sum(R)
